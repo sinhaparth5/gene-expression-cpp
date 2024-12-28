@@ -163,26 +163,38 @@ void GeneExpressionAnalysis::preprocessData(const AnalysisParameters& params) {
     validateParameters(params);
 
     try {
+        // Add progress reporting
+        std::cout << "Starting preprocessing..." << std::endl;
+        
+        // Pre-filter genes with very low expression to reduce memory usage early
+        if (!state.isFiltered) {
+            std::cout << "Filtering low expression genes..." << std::endl;
+            filterLowExpression(params.minMeanExpression);
+            
+            // Only proceed with variance filtering if we have enough genes left
+            if (data.numGenes > 100) {
+                std::cout << "Filtering low variance genes..." << std::endl;
+                filterLowVariance(params.minVariance);
+            }
+            state.isFiltered = true;
+        }
+
         // Log transform if requested and not already done
         if (params.performLogTransform && !state.isLogTransformed) {
+            std::cout << "Performing log transformation..." << std::endl;
             logTransform();
             state.isLogTransformed = true;
         }
 
-        // Filter low expression genes
-        if (!state.isFiltered) {
-            filterLowExpression(params.minMeanExpression);
-            filterLowVariance(params.minVariance);
-            state.isFiltered = true;
-        }
-
         // Normalize data
         if (params.performQuantileNorm && !state.isNormalized) {
+            std::cout << "Performing normalization..." << std::endl;
             normalizeData();
             state.isNormalized = true;
         }
 
         // Center the data
+        std::cout << "Centering data..." << std::endl;
         centerData();
 
         // Calculate QC metrics
@@ -241,27 +253,29 @@ void GeneExpressionAnalysis::normalizeData() {
 }
 
 void GeneExpressionAnalysis::filterLowExpression(double threshold) {
-    Eigen::VectorXd rowMeans = data.expressionMatrix.rowwise().mean();
+    // Calculate column-wise means since genes are columns
+    Eigen::VectorXd geneMeans = data.expressionMatrix.colwise().mean();
     std::vector<int> validIndices;
     
-    for (int i = 0; i < rowMeans.size(); ++i) {
-        if (rowMeans(i) > threshold) {
+    for (int i = 0; i < geneMeans.size(); ++i) {
+        if (geneMeans(i) > threshold) {
             validIndices.push_back(i);
         }
     }
 
-    // Create filtered matrix and update gene names
-    Eigen::MatrixXd filteredMatrix(validIndices.size(), data.expressionMatrix.cols());
+    // Create filtered matrix maintaining sample rows × gene columns structure
+    Eigen::MatrixXd filteredMatrix(data.expressionMatrix.rows(), validIndices.size());
     std::vector<std::string> filteredGenes;
     
     for (size_t i = 0; i < validIndices.size(); ++i) {
-        filteredMatrix.row(i) = data.expressionMatrix.row(validIndices[i]);
+        filteredMatrix.col(i) = data.expressionMatrix.col(validIndices[i]);
         filteredGenes.push_back(data.geneNames[validIndices[i]]);
     }
 
     data.expressionMatrix = filteredMatrix;
     data.geneNames = filteredGenes;
-    data.numLowExpressionGenes = rowMeans.size() - validIndices.size();
+    data.numGenes = validIndices.size();
+    data.numLowExpressionGenes = geneMeans.size() - validIndices.size();
 }
 
 void GeneExpressionAnalysis::centerData() {
@@ -379,24 +393,24 @@ void GeneExpressionAnalysis::filterLowVariance(double threshold) {
     std::vector<int> validIndices;
     validIndices.reserve(data.numGenes);
 
-    // Calculate variance for each gene
-    for (int i = 0; i < data.expressionMatrix.rows(); ++i) {
-        Eigen::VectorXd row = data.expressionMatrix.row(i);
-        double mean = row.mean();
-        double variance = (row.array() - mean).square().sum() / (row.size() - 1);
+    // Calculate variance for each gene (column)
+    for (int i = 0; i < data.expressionMatrix.cols(); ++i) {
+        Eigen::VectorXd col = data.expressionMatrix.col(i);
+        double mean = col.mean();
+        double variance = (col.array() - mean).square().sum() / (col.size() - 1);
         
         if (variance > threshold) {
             validIndices.push_back(i);
         }
     }
 
-    // Create filtered matrix
-    Eigen::MatrixXd filteredMatrix(validIndices.size(), data.expressionMatrix.cols());
+    // Create filtered matrix maintaining sample rows × gene columns structure
+    Eigen::MatrixXd filteredMatrix(data.expressionMatrix.rows(), validIndices.size());
     std::vector<std::string> filteredGenes;
     filteredGenes.reserve(validIndices.size());
 
     for (size_t i = 0; i < validIndices.size(); ++i) {
-        filteredMatrix.row(i) = data.expressionMatrix.row(validIndices[i]);
+        filteredMatrix.col(i) = data.expressionMatrix.col(validIndices[i]);
         filteredGenes.push_back(data.geneNames[validIndices[i]]);
     }
 
@@ -470,53 +484,112 @@ void GeneExpressionAnalysis::exportClusterVisualization(
         throw ProcessingError("Cannot open output file: " + outputFile);
     }
 
-    // Write HTML header
-    out << "<!DOCTYPE html>\n<html>\n<head>\n"
-        << "<title>Gene Expression Clusters Visualization</title>\n"
-        << "<style>\n"
-        << ".heatmap { border-collapse: collapse; }\n"
-        << ".heatmap td { width: 20px; height: 20px; padding: 0; }\n"
-        << ".gene-label { padding-right: 10px; font-family: monospace; }\n"
-        << ".cluster-header { padding: 10px 0; font-weight: bold; }\n"
-        << "</style>\n</head>\n<body>\n";
+    // Write HTML with modern styling and interactive features
+    out << R"(<!DOCTYPE html>
+<html>
+<head>
+    <title>Gene Expression Clusters Visualization</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .heatmap { border-collapse: collapse; margin-top: 20px; }
+        .heatmap td { width: 2px; height: 20px; padding: 0; }
+        .gene-label { 
+            padding-right: 10px; 
+            font-family: monospace; 
+            position: sticky; 
+            left: 0; 
+            background: white;
+            z-index: 1;
+        }
+        .cluster-header { 
+            padding: 10px 0; 
+            font-weight: bold; 
+            background: #f0f0f0;
+            cursor: pointer;
+        }
+        .cluster-content { transition: all 0.3s ease; }
+        .stats-table { 
+            margin: 10px 0;
+            border-collapse: collapse;
+        }
+        .stats-table td, .stats-table th {
+            border: 1px solid #ddd;
+            padding: 8px;
+        }
+        .color-scale {
+            display: flex;
+            align-items: center;
+            margin: 20px 0;
+        }
+        .scale-gradient {
+            width: 200px;
+            height: 20px;
+            background: linear-gradient(to right, #000080, #0000FF, #4169E1);
+            margin: 0 10px;
+        }
+    </style>
+    <script>
+        function toggleCluster(clusterId) {
+            const content = document.getElementById('cluster-' + clusterId);
+            content.style.display = content.style.display === 'none' ? 'table-row-group' : 'none';
+        }
+    </script>
+</head>
+<body>
+    <div class="container">)";
 
-    // Write summary
-    out << "<div style='margin: 20px;'>\n"
-        << "<h2>Clustering Summary</h2>\n"
-        << "<p>Total Clusters: " << results.clusters.size() << "</p>\n"
-        << "<p>Total Genes: " << data.numGenes << "</p>\n"
-        << "</div>\n";
+    // Write summary statistics
+    out << "<h2>Clustering Summary</h2>"
+        << "<p>Total Clusters: " << results.clusters.size() << "</p>"
+        << "<p>Total Genes: " << data.numGenes << "</p>";
 
-    // Create heatmap
+    // Add color scale legend
+    out << R"(<div class="color-scale">
+        <span>Low</span>
+        <div class="scale-gradient"></div>
+        <span>High</span>
+    </div>)";
+
+    // Create heatmap with collapsible clusters
     out << "<table class='heatmap'>\n";
     
     for (size_t i = 0; i < results.clusters.size(); ++i) {
         const auto& cluster = results.clusters[i];
         if (cluster.empty()) continue;
 
+        // Cluster header with toggle
         out << "<tr><td colspan='" << (data.numSamples + 1) 
-            << "' class='cluster-header'>Cluster " << i 
-            << " (Size: " << cluster.size() << ")</td></tr>\n";
+            << "' class='cluster-header' onclick='toggleCluster(" << i << ")'>"
+            << "Cluster " << i << " (Size: " << cluster.size() << ")"
+            << "</td></tr>\n";
+        
+        // Cluster content
+        out << "<tbody id='cluster-" << i << "' class='cluster-content'>\n";
         
         for (int geneIdx : cluster) {
             if (geneIdx >= 0 && geneIdx < data.geneNames.size()) {
                 out << "<tr>\n<td class='gene-label'>" << data.geneNames[geneIdx] << "</td>\n";
                 
-                // Add expression values with color coding
+                // Add expression values with optimized color coding
                 for (int j = 0; j < data.expressionMatrix.cols(); ++j) {
                     double value = data.expressionMatrix(geneIdx, j);
-                    int intensity = static_cast<int>((value + 4) * 32); // Scale for visualization
+                    // Normalize value between 0 and 255
+                    int intensity = static_cast<int>((value + 4) * 32);
                     intensity = std::min(255, std::max(0, intensity));
                     
-                    out << "<td style='background-color: rgb(0,0," 
-                        << intensity << ")'></td>\n";
+                    out << "<td style='background-color: rgb(" 
+                        << (255 - intensity) << "," 
+                        << (255 - intensity) << "," 
+                        << 255 << ")'></td>\n";
                 }
                 out << "</tr>\n";
             }
         }
+        out << "</tbody>\n";
     }
     
-    out << "</table>\n</body>\n</html>";
+    out << "</table>\n</div>\n</body>\n</html>";
 }
 
 } // namespace geneexp

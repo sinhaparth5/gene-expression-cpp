@@ -46,14 +46,14 @@ int main(int argc, char* argv[]) {
 
         // Set analysis parameters
         AnalysisParameters params;
-        params.minMeanExpression = 1.0;
-        params.minVariance = 0.1;
+        params.minMeanExpression = 2.0;
+        params.minVariance = 0.2;
         params.performLogTransform = true;
         params.performQuantileNorm = true;
         params.correlationType = AnalysisParameters::CorrelationType::PEARSON;
-        params.correlationThreshold = 0.3;
-        params.minClusterSize = 5;
-        params.maxClusterSize = 1000;
+        params.correlationThreshold = 0.4;
+        params.minClusterSize = 10;
+        params.maxClusterSize = 500;
 
         // Preprocess data
         std::cout << "Preprocessing data...\n";
