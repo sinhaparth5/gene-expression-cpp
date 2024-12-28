@@ -8,12 +8,137 @@
 namespace geneexp {
 namespace clustering {
 
-// ... [previous code remains the same]
+HierarchicalClustering::HierarchicalClustering(LinkageType linkage)
+    : linkageType(linkage) {}
+
+ClusteringResult HierarchicalClustering::performClustering(
+    const Eigen::MatrixXd& correlationMatrix,
+    const AnalysisParameters& params) {
+    
+    int n = correlationMatrix.rows();
+    std::vector<std::vector<int>> clusters(n);
+    
+    // Initialize each gene as its own cluster
+    for (int i = 0; i < n; ++i) {
+        clusters[i] = {i};
+    }
+
+    // Convert correlation to distance
+    Eigen::MatrixXd distanceMatrix = (1 - correlationMatrix.array()).abs();
+
+    // Perform hierarchical clustering
+    clusters = mergeClusters(clusters, distanceMatrix, params.correlationThreshold);
+
+    // Calculate cluster scores and statistics
+    std::vector<double> clusterScores;
+    std::vector<ClusteringResult::ClusterStats> clusterStats;
+
+    for (const auto& cluster : clusters) {
+        if (cluster.size() >= params.minClusterSize && 
+            cluster.size() <= params.maxClusterSize) {
+            
+            double totalCorr = 0.0;
+            double minCorr = 1.0;
+            double maxCorr = -1.0;
+            int pairs = 0;
+
+            for (size_t i = 0; i < cluster.size(); ++i) {
+                for (size_t j = i + 1; j < cluster.size(); ++j) {
+                    double corr = correlationMatrix(cluster[i], cluster[j]);
+                    totalCorr += corr;
+                    minCorr = std::min(minCorr, corr);
+                    maxCorr = std::max(maxCorr, corr);
+                    pairs++;
+                }
+            }
+
+            double meanCorr = pairs > 0 ? totalCorr / pairs : 0.0;
+            clusterScores.push_back(meanCorr);
+
+            ClusteringResult::ClusterStats stats{
+                meanCorr,
+                minCorr,
+                maxCorr,
+                std::vector<std::string>(),
+                std::vector<double>()
+            };
+            clusterStats.push_back(stats);
+        }
+    }
+
+    return ClusteringResult{
+        clusters,
+        clusterScores,
+        correlationMatrix,
+        clusterStats
+    };
+}
+
+std::vector<std::vector<int>> HierarchicalClustering::mergeClusters(
+    const std::vector<std::vector<int>>& clusters,
+    const Eigen::MatrixXd& distanceMatrix,
+    double threshold) {
+    
+    std::vector<std::vector<int>> currentClusters = clusters;
+    
+    while (currentClusters.size() > 1) {
+        double minDist = std::numeric_limits<double>::infinity();
+        int minI = -1, minJ = -1;
+        
+        for (size_t i = 0; i < currentClusters.size(); ++i) {
+            for (size_t j = i + 1; j < currentClusters.size(); ++j) {
+                double dist = calculateClusterDistance(
+                    currentClusters[i], currentClusters[j], distanceMatrix);
+                
+                if (dist < minDist) {
+                    minDist = dist;
+                    minI = i;
+                    minJ = j;
+                }
+            }
+        }
+
+        if (minDist > threshold) {
+            break;
+        }
+
+        // Merge clusters
+        currentClusters[minI].insert(
+            currentClusters[minI].end(),
+            currentClusters[minJ].begin(),
+            currentClusters[minJ].end()
+        );
+        currentClusters.erase(currentClusters.begin() + minJ);
+    }
+
+    return currentClusters;
+}
+
+double HierarchicalClustering::calculateClusterDistance(
+    const std::vector<int>& cluster1,
+    const std::vector<int>& cluster2,
+    const Eigen::MatrixXd& distanceMatrix) {
+    
+    std::vector<double> distances;
+    distances.reserve(cluster1.size() * cluster2.size());
+
+    for (int i : cluster1) {
+        for (int j : cluster2) {
+            distances.push_back(distanceMatrix(i, j));
+        }
+    }
+
+    return calculateLinkageDistance(distances, linkageType);
+}
 
 double HierarchicalClustering::calculateLinkageDistance(
     const std::vector<double>& distances,
     LinkageType type) {
     
+    if (distances.empty()) {
+        return std::numeric_limits<double>::infinity();
+    }
+
     switch (type) {
         case LinkageType::SINGLE:
             return *std::min_element(distances.begin(), distances.end());
@@ -59,8 +184,8 @@ std::string HierarchicalClustering::getDescription() const {
 }
 
 // K-means Clustering Implementation
-KMeansClustering::KMeansClustering(int k, int maxIterations)
-    : k(k), maxIterations(maxIterations) {}
+KMeansClustering::KMeansClustering(int k, int maxIter)
+    : k(k), maxIter(maxIter) {}
 
 ClusteringResult KMeansClustering::performClustering(
     const Eigen::MatrixXd& correlationMatrix,
@@ -73,7 +198,7 @@ ClusteringResult KMeansClustering::performClustering(
     std::vector<int> assignments(n);
     
     // Iterate until convergence or max iterations
-    for (int iter = 0; iter < maxIterations; ++iter) {
+    for (int iter = 0; iter < maxIter; ++iter) {
         // Assign points to nearest centroid
         std::vector<int> newAssignments = assignClusters(correlationMatrix, centroids);
         
@@ -166,6 +291,8 @@ Eigen::MatrixXd KMeansClustering::initializeCentroids(
         
         // Choose next centroid
         double sum = std::accumulate(distances.begin(), distances.end(), 0.0);
+        if (sum <= 0) break;  // Avoid division by zero
+        
         double r = dis(gen) * sum;
         double cumSum = 0.0;
         int nextCentroid = 0;
@@ -242,7 +369,7 @@ Eigen::MatrixXd KMeansClustering::updateCentroids(
 
 std::string KMeansClustering::getDescription() const {
     return "K-means clustering with k=" + std::to_string(k) + 
-           " and max_iterations=" + std::to_string(maxIterations);
+           " and max_iterations=" + std::to_string(maxIter);
 }
 
 // Factory Implementation

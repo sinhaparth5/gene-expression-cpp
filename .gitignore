@@ -34,6 +34,7 @@
 
 # build folder
 build/
+data
 
 #IDEs
 .vscode

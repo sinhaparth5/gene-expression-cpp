@@ -21,79 +21,136 @@ GeneExpressionAnalysis::~GeneExpressionAnalysis() = default;
 bool GeneExpressionAnalysis::loadData(const std::string& expressionFile, 
                                     const std::string& labelsFile) {
     try {
+        std::cout << "Starting to load data files..." << std::endl;
+        
         // Load expression data
         std::ifstream expFile(expressionFile);
         if (!expFile.is_open()) {
-            throw DataLoadingError("Cannot open expression file: " + expressionFile);
+            std::cerr << "Error: Cannot open expression file: " << expressionFile << std::endl;
+            return false;
         }
 
         // Read header
         std::string line;
-        std::getline(expFile, line);
-        std::istringstream iss(line);
-        std::string token;
-        
-        // Parse header to get sample labels
-        while (std::getline(iss, token, ',')) {
-            if (token != "gene_id") // Skip first column header
-                data.sampleLabels.push_back(token);
+        if (!std::getline(expFile, line)) {
+            std::cerr << "Error: Expression file is empty" << std::endl;
+            return false;
         }
 
-        // Read expression data
+        std::istringstream iss(line);
+        std::string token;
+        std::getline(iss, token, ','); // Skip the empty first column header
+        
+        // Parse header to get gene names (columns are genes in this case)
+        while (std::getline(iss, token, ',')) {
+            data.geneNames.push_back(token);
+        }
+
+        if (data.geneNames.empty()) {
+            std::cerr << "Error: No genes found in header" << std::endl;
+            return false;
+        }
+        std::cout << "Found " << data.geneNames.size() << " genes in header" << std::endl;
+
+        // Read sample data
         std::vector<std::vector<double>> tempData;
+        int lineNum = 1;
         while (std::getline(expFile, line)) {
+            lineNum++;
             std::vector<double> row;
             std::istringstream iss(line);
             
-            // Get gene name
-            std::getline(iss, token, ',');
-            data.geneNames.push_back(token);
+            // Get sample name
+            std::string sampleName;
+            if (!std::getline(iss, sampleName, ',')) {
+                std::cerr << "Error: Invalid format at line " << lineNum << std::endl;
+                continue;
+            }
+            data.sampleLabels.push_back(sampleName);
             
             // Get expression values
             while (std::getline(iss, token, ',')) {
                 try {
-                    row.push_back(std::stod(token));
+                    double value = std::stod(token);
+                    row.push_back(value);
                 } catch (const std::exception& e) {
-                    addWarning("Invalid expression value found: " + token);
-                    row.push_back(0.0); // Default to zero for invalid values
+                    std::cerr << "Warning: Invalid value '" << token << "' at line " << lineNum 
+                             << ", using 0.0" << std::endl;
+                    row.push_back(0.0);
                 }
             }
+
+            if (row.size() != data.geneNames.size()) {
+                std::cerr << "Error: Inconsistent number of values at line " << lineNum 
+                         << ". Expected: " << data.geneNames.size() 
+                         << ", Got: " << row.size() << std::endl;
+                continue;
+            }
+
             tempData.push_back(row);
         }
 
-        // Convert to Eigen matrix
-        data.expressionMatrix = Eigen::MatrixXd::Zero(tempData.size(), tempData[0].size());
+        if (tempData.empty()) {
+            std::cerr << "Error: No valid expression data found" << std::endl;
+            return false;
+        }
+
+        // Convert to Eigen matrix (samples as rows, genes as columns)
+        data.expressionMatrix = Eigen::MatrixXd::Zero(tempData.size(), data.geneNames.size());
         for (size_t i = 0; i < tempData.size(); ++i) {
             for (size_t j = 0; j < tempData[i].size(); ++j) {
                 data.expressionMatrix(i, j) = tempData[i][j];
             }
         }
 
+        std::cout << "Expression matrix dimensions: " 
+                  << data.expressionMatrix.rows() << " samples × " 
+                  << data.expressionMatrix.cols() << " genes" << std::endl;
+
         // Load labels
         std::ifstream labFile(labelsFile);
         if (!labFile.is_open()) {
-            throw DataLoadingError("Cannot open labels file: " + labelsFile);
+            std::cerr << "Error: Cannot open labels file: " << labelsFile << std::endl;
+            return false;
         }
 
         std::getline(labFile, line); // Skip header
-        int idx = 0;
+        std::map<std::string, std::string> sampleToClass;
+        
         while (std::getline(labFile, line)) {
             std::istringstream iss(line);
             std::string sample, label;
-            std::getline(iss, sample, ',');
-            std::getline(iss, label, ',');
-            data.labelIndices[label].push_back(idx++);
+            
+            std::getline(iss, sample, ','); // Skip empty first column
+            if (!std::getline(iss, sample, ',')) continue;
+            if (!std::getline(iss, label, ',')) continue;
+            
+            sampleToClass[sample] = label;
+        }
+
+        // Map samples to their class labels
+        for (size_t i = 0; i < data.sampleLabels.size(); ++i) {
+            std::string label = sampleToClass[data.sampleLabels[i]];
+            data.labelIndices[label].push_back(i);
         }
 
         // Update metadata
-        data.numGenes = data.expressionMatrix.rows();
-        data.numSamples = data.expressionMatrix.cols();
+        data.numGenes = data.expressionMatrix.cols();
+        data.numSamples = data.expressionMatrix.rows();
+        data.datasetName = "Gene Expression Dataset";
+        data.description = "Dataset with " + std::to_string(data.numGenes) + 
+                          " genes across " + std::to_string(data.numSamples) + " samples";
+
+        std::cout << "Successfully loaded data with:" << std::endl
+                  << "- " << data.numSamples << " samples" << std::endl
+                  << "- " << data.numGenes << " genes" << std::endl
+                  << "- " << data.labelIndices.size() << " unique classes" << std::endl;
 
         isDataLoaded = true;
         return true;
     }
     catch (const std::exception& e) {
-        addError("Error loading data: " + std::string(e.what()));
+        std::cerr << "Error loading data: " << e.what() << std::endl;
         return false;
     }
 }
@@ -316,6 +373,150 @@ void GeneExpressionAnalysis::validateParameters(const AnalysisParameters& params
     if (params.maxClusterSize < params.minClusterSize) {
         throw std::invalid_argument("Maximum cluster size must be greater than minimum cluster size");
     }
+}
+
+void GeneExpressionAnalysis::filterLowVariance(double threshold) {
+    std::vector<int> validIndices;
+    validIndices.reserve(data.numGenes);
+
+    // Calculate variance for each gene
+    for (int i = 0; i < data.expressionMatrix.rows(); ++i) {
+        Eigen::VectorXd row = data.expressionMatrix.row(i);
+        double mean = row.mean();
+        double variance = (row.array() - mean).square().sum() / (row.size() - 1);
+        
+        if (variance > threshold) {
+            validIndices.push_back(i);
+        }
+    }
+
+    // Create filtered matrix
+    Eigen::MatrixXd filteredMatrix(validIndices.size(), data.expressionMatrix.cols());
+    std::vector<std::string> filteredGenes;
+    filteredGenes.reserve(validIndices.size());
+
+    for (size_t i = 0; i < validIndices.size(); ++i) {
+        filteredMatrix.row(i) = data.expressionMatrix.row(validIndices[i]);
+        filteredGenes.push_back(data.geneNames[validIndices[i]]);
+    }
+
+    data.numHighVarianceGenes = validIndices.size();
+    data.expressionMatrix = filteredMatrix;
+    data.geneNames = filteredGenes;
+    data.numGenes = validIndices.size();
+}
+
+Eigen::MatrixXd GeneExpressionAnalysis::calculateSpearmanCorrelation() const {
+    const int numGenes = data.expressionMatrix.rows();
+    const int numSamples = data.expressionMatrix.cols();
+    Eigen::MatrixXd rankMatrix(numGenes, numSamples);
+
+    // Calculate ranks for each gene
+    for (int i = 0; i < numGenes; ++i) {
+        std::vector<std::pair<double, int>> values(numSamples);
+        for (int j = 0; j < numSamples; ++j) {
+            values[j] = {data.expressionMatrix(i, j), j};
+        }
+        
+        std::sort(values.begin(), values.end());
+        
+        // Handle ties by using average ranks
+        for (int j = 0; j < numSamples;) {
+            int k = j + 1;
+            while (k < numSamples && values[k].first == values[j].first) {
+                k++;
+            }
+            
+            // Calculate average rank for ties
+            double avgRank = (j + k - 1) / 2.0 + 1;
+            for (int l = j; l < k; l++) {
+                rankMatrix(i, values[l].second) = avgRank;
+            }
+            j = k;
+        }
+    }
+
+    // Calculate correlation on ranks using Pearson correlation formula
+    Eigen::MatrixXd correlationMatrix = Eigen::MatrixXd::Zero(numGenes, numGenes);
+    
+    for (int i = 0; i < numGenes; ++i) {
+        Eigen::VectorXd ranksI = rankMatrix.row(i);
+        double meanI = ranksI.mean();
+        double stdI = std::sqrt((ranksI.array() - meanI).square().sum() / (numSamples - 1));
+
+        for (int j = i; j < numGenes; ++j) {
+            Eigen::VectorXd ranksJ = rankMatrix.row(j);
+            double meanJ = ranksJ.mean();
+            double stdJ = std::sqrt((ranksJ.array() - meanJ).square().sum() / (numSamples - 1));
+
+            if (stdI > 0 && stdJ > 0) {
+                double correlation = ((ranksI.array() - meanI) * (ranksJ.array() - meanJ)).sum() 
+                                   / ((numSamples - 1) * stdI * stdJ);
+                correlationMatrix(i, j) = correlation;
+                correlationMatrix(j, i) = correlation;
+            }
+        }
+    }
+
+    return correlationMatrix;
+}
+
+void GeneExpressionAnalysis::exportClusterVisualization(
+    const ClusteringResult& results, 
+    const std::string& outputFile) const {
+    
+    std::ofstream out(outputFile);
+    if (!out.is_open()) {
+        throw ProcessingError("Cannot open output file: " + outputFile);
+    }
+
+    // Write HTML header
+    out << "<!DOCTYPE html>\n<html>\n<head>\n"
+        << "<title>Gene Expression Clusters Visualization</title>\n"
+        << "<style>\n"
+        << ".heatmap { border-collapse: collapse; }\n"
+        << ".heatmap td { width: 20px; height: 20px; padding: 0; }\n"
+        << ".gene-label { padding-right: 10px; font-family: monospace; }\n"
+        << ".cluster-header { padding: 10px 0; font-weight: bold; }\n"
+        << "</style>\n</head>\n<body>\n";
+
+    // Write summary
+    out << "<div style='margin: 20px;'>\n"
+        << "<h2>Clustering Summary</h2>\n"
+        << "<p>Total Clusters: " << results.clusters.size() << "</p>\n"
+        << "<p>Total Genes: " << data.numGenes << "</p>\n"
+        << "</div>\n";
+
+    // Create heatmap
+    out << "<table class='heatmap'>\n";
+    
+    for (size_t i = 0; i < results.clusters.size(); ++i) {
+        const auto& cluster = results.clusters[i];
+        if (cluster.empty()) continue;
+
+        out << "<tr><td colspan='" << (data.numSamples + 1) 
+            << "' class='cluster-header'>Cluster " << i 
+            << " (Size: " << cluster.size() << ")</td></tr>\n";
+        
+        for (int geneIdx : cluster) {
+            if (geneIdx >= 0 && geneIdx < data.geneNames.size()) {
+                out << "<tr>\n<td class='gene-label'>" << data.geneNames[geneIdx] << "</td>\n";
+                
+                // Add expression values with color coding
+                for (int j = 0; j < data.expressionMatrix.cols(); ++j) {
+                    double value = data.expressionMatrix(geneIdx, j);
+                    int intensity = static_cast<int>((value + 4) * 32); // Scale for visualization
+                    intensity = std::min(255, std::max(0, intensity));
+                    
+                    out << "<td style='background-color: rgb(0,0," 
+                        << intensity << ")'></td>\n";
+                }
+                out << "</tr>\n";
+            }
+        }
+    }
+    
+    out << "</table>\n</body>\n</html>";
 }
 
 } // namespace geneexp
