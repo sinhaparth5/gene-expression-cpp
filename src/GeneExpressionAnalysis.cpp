@@ -475,121 +475,181 @@ Eigen::MatrixXd GeneExpressionAnalysis::calculateSpearmanCorrelation() const {
     return correlationMatrix;
 }
 
+std::vector<int> GeneExpressionAnalysis::selectTopGenes(int numGenes) const {
+    std::vector<std::pair<double, int>> geneVariances;
+    
+    // Calculate variance for each gene
+    for (int i = 0; i < data.expressionMatrix.cols(); ++i) {
+        Eigen::VectorXd col = data.expressionMatrix.col(i);
+        double mean = col.mean();
+        double variance = (col.array() - mean).square().sum() / (col.size() - 1);
+        geneVariances.push_back({variance, i});
+    }
+    
+    // Sort by variance in descending order
+    std::sort(geneVariances.begin(), geneVariances.end(),
+              std::greater<std::pair<double, int>>());
+    
+    // Select top N genes
+    std::vector<int> topGenes;
+    for (int i = 0; i < std::min(numGenes, (int)geneVariances.size()); ++i) {
+        topGenes.push_back(geneVariances[i].second);
+    }
+    
+    return topGenes;
+}
+
+void GeneExpressionAnalysis::exportBestGeneImage(const std::string& outputFile) const {
+    const int IMAGE_WIDTH = 1000;
+    const int IMAGE_HEIGHT = 200;
+
+    std::vector<unsigned char> image(IMAGE_WIDTH * IMAGE_HEIGHT * 3, 255);
+
+    // Find the gene with highest variance (reuse same logic)
+    double maxVariance = -1;
+    int bestGeneIdx = 0;
+
+    for (int i = 0; i < data.expressionMatrix.cols(); ++i) {
+        Eigen::VectorXd col = data.expressionMatrix.col(i);
+        double mean = col.mean();
+        double variance = (col.array() - mean).square().sum() / (col.size() - 1);
+
+        if (variance > maxVariance) {
+            maxVariance = variance;
+            bestGeneIdx = i;
+        }
+    }
+
+    // Get expression values for best gene
+    Eigen::VectorXd geneExpr = data.expressionMatrix.col(bestGeneIdx);
+
+    // Calculate min and max for scaling
+    double minExpr = geneExpr.minCoeff();
+    double maxExpr = geneExpr.maxCoeff();
+
+    double width = static_cast<double>(IMAGE_WIDTH) / geneExpr.size();
+
+    for (int i = 0; i < geneExpr.size(); ++i) {
+        //Normalize expression value to 0-1 range
+        double normalizedExpr = (geneExpr(i) - minExpr) / (maxExpr - minExpr);
+
+        // Convert to blue intensity
+        int blueIntensity = static_cast<int>(255 * (1.0 - normalizedExpr));
+
+        // Fill the column in the image
+        int x = static_cast<int>(i * width);
+        int nextX = static_cast<int>((i + 1) * width);
+
+        for (int px = x; px < nextX && px < IMAGE_WIDTH; ++px) {
+            for (int y = 50; y < 150; ++y) {
+                int idx = (y * IMAGE_WIDTH + px) * 3;
+                image[idx] = blueIntensity;
+                image[idx + 1] = blueIntensity;
+                image[idx + 2] = 255;
+            }
+        }
+    }
+
+    //Save as ppm (a simple image format)
+    std::ofstream out(outputFile, std::ios::binary);
+    if(!out.is_open()) {
+        throw ProcessingError("Connot open output file: " + outputFile);
+    }
+
+    out << "P6\n" << IMAGE_WIDTH << " " << IMAGE_HEIGHT << "\n255\n";
+
+    //Write image data
+    out.write(reinterpret_cast<char*>(image.data()), image.size());
+}
+
 void GeneExpressionAnalysis::exportClusterVisualization(
     const ClusteringResult& results, 
-    const std::string& outputFile) const {
+    const std::string& outputFile,
+    int maxGenesPerCluster) const {
     
     std::ofstream out(outputFile);
     if (!out.is_open()) {
         throw ProcessingError("Cannot open output file: " + outputFile);
     }
 
-    // Write HTML with modern styling and interactive features
+    // Write HTML header with simplified styling
     out << R"(<!DOCTYPE html>
 <html>
 <head>
-    <title>Gene Expression Clusters Visualization</title>
+    <title>Gene Expression Clusters (Subset)</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; }
-        .container { max-width: 1200px; margin: 0 auto; }
-        .heatmap { border-collapse: collapse; margin-top: 20px; }
-        .heatmap td { width: 2px; height: 20px; padding: 0; }
+        .heatmap { border-collapse: collapse; }
+        .heatmap td { width: 3px; height: 25px; padding: 0; }
         .gene-label { 
             padding-right: 10px; 
             font-family: monospace; 
-            position: sticky; 
-            left: 0; 
             background: white;
-            z-index: 1;
         }
         .cluster-header { 
             padding: 10px 0; 
             font-weight: bold; 
             background: #f0f0f0;
-            cursor: pointer;
-        }
-        .cluster-content { transition: all 0.3s ease; }
-        .stats-table { 
-            margin: 10px 0;
-            border-collapse: collapse;
-        }
-        .stats-table td, .stats-table th {
-            border: 1px solid #ddd;
-            padding: 8px;
-        }
-        .color-scale {
-            display: flex;
-            align-items: center;
-            margin: 20px 0;
-        }
-        .scale-gradient {
-            width: 200px;
-            height: 20px;
-            background: linear-gradient(to right, #000080, #0000FF, #4169E1);
-            margin: 0 10px;
         }
     </style>
-    <script>
-        function toggleCluster(clusterId) {
-            const content = document.getElementById('cluster-' + clusterId);
-            content.style.display = content.style.display === 'none' ? 'table-row-group' : 'none';
-        }
-    </script>
 </head>
-<body>
-    <div class="container">)";
+<body>)";
 
-    // Write summary statistics
-    out << "<h2>Clustering Summary</h2>"
-        << "<p>Total Clusters: " << results.clusters.size() << "</p>"
-        << "<p>Total Genes: " << data.numGenes << "</p>";
+    out << "<h2>Gene Expression Clusters (Top Genes)</h2>"
+        << "<p>Showing up to " << maxGenesPerCluster << " genes per cluster</p>";
 
-    // Add color scale legend
-    out << R"(<div class="color-scale">
-        <span>Low</span>
-        <div class="scale-gradient"></div>
-        <span>High</span>
-    </div>)";
-
-    // Create heatmap with collapsible clusters
     out << "<table class='heatmap'>\n";
     
     for (size_t i = 0; i < results.clusters.size(); ++i) {
         const auto& cluster = results.clusters[i];
         if (cluster.empty()) continue;
 
-        // Cluster header with toggle
-        out << "<tr><td colspan='" << (data.numSamples + 1) 
-            << "' class='cluster-header' onclick='toggleCluster(" << i << ")'>"
-            << "Cluster " << i << " (Size: " << cluster.size() << ")"
-            << "</td></tr>\n";
-        
-        // Cluster content
-        out << "<tbody id='cluster-" << i << "' class='cluster-content'>\n";
-        
+        // Get indices of genes in this cluster
+        std::vector<std::pair<double, int>> clusterGeneVariances;
         for (int geneIdx : cluster) {
-            if (geneIdx >= 0 && geneIdx < data.geneNames.size()) {
-                out << "<tr>\n<td class='gene-label'>" << data.geneNames[geneIdx] << "</td>\n";
-                
-                // Add expression values with optimized color coding
-                for (int j = 0; j < data.expressionMatrix.cols(); ++j) {
-                    double value = data.expressionMatrix(geneIdx, j);
-                    // Normalize value between 0 and 255
-                    int intensity = static_cast<int>((value + 4) * 32);
-                    intensity = std::min(255, std::max(0, intensity));
-                    
-                    out << "<td style='background-color: rgb(" 
-                        << (255 - intensity) << "," 
-                        << (255 - intensity) << "," 
-                        << 255 << ")'></td>\n";
-                }
-                out << "</tr>\n";
-            }
+            Eigen::VectorXd col = data.expressionMatrix.col(geneIdx);
+            double mean = col.mean();
+            double variance = (col.array() - mean).square().sum() / (col.size() - 1);
+            clusterGeneVariances.push_back({variance, geneIdx});
         }
-        out << "</tbody>\n";
+        
+        // Sort cluster genes by variance
+        std::sort(clusterGeneVariances.begin(), clusterGeneVariances.end(),
+                 std::greater<std::pair<double, int>>());
+        
+        // Take only top N genes from this cluster
+        std::vector<int> clusterSubset;
+        for (size_t j = 0; j < std::min(static_cast<size_t>(maxGenesPerCluster), 
+                                      clusterGeneVariances.size()); ++j) {
+            clusterSubset.push_back(clusterGeneVariances[j].second);
+        }
+
+        if (clusterSubset.empty()) continue;
+
+        // Cluster header
+        out << "<tr><td colspan='" << (data.expressionMatrix.cols() + 1) 
+            << "' class='cluster-header'>Cluster " << i 
+            << " (Showing " << clusterSubset.size() << " top genes)</td></tr>\n";
+        
+        // Output only the selected genes
+        for (int geneIdx : clusterSubset) {
+            out << "<tr>\n<td class='gene-label'>" << data.geneNames[geneIdx] << "</td>\n";
+            
+            // Add expression values
+            for (int j = 0; j < data.expressionMatrix.cols(); ++j) {
+                double value = data.expressionMatrix(geneIdx, j);
+                int intensity = static_cast<int>((value + 4) * 32);
+                intensity = std::min(255, std::max(0, intensity));
+                
+                out << "<td style='background-color: rgb(" 
+                    << (255 - intensity) << "," 
+                    << (255 - intensity) << "," 
+                    << 255 << ")'></td>\n";
+            }
+            out << "</tr>\n";
+        }
     }
     
-    out << "</table>\n</div>\n</body>\n</html>";
+    out << "</table>\n</body>\n</html>";
 }
-
 } // namespace geneexp

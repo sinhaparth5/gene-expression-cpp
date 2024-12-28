@@ -43,6 +43,16 @@ public:
     void exportCorrelationMatrix(const std::string& outputFile) const;
     void exportClusterVisualization(const ClusteringResult& results, const std::string& outputFile) const;
 
+    // Add the new visualization method with the parameters
+    void exportClusterVisualization(
+        const ClusteringResult& results,
+        const std::string& outputFile,
+        int maxGenesPerCluster = 3
+    ) const;
+
+    // Image export
+    void exportBestGeneImage(const std::string& outputFile) const;
+
     // Getters
     const GeneExpressionData& getData() const { return data; }
     const std::vector<std::string>& getWarnings() const { return warnings; }
@@ -54,6 +64,7 @@ private:
     std::vector<std::string> errors;
     bool isDataLoaded;
     bool isPreprocessed;
+    std::vector<int> selectTopGenes(int numGenes) const;
 
     // Helper methods
     void centerData();
